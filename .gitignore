@@ -1,0 +1,18 @@
+# .gitignore for Power BI Monitor AL project
+*.app
+*.alpackages/
+*.snapshots/
+.vscode/
+*.user
+*.vs/
+*.pdb
+*.dll
+*.exe
+*.db
+*.bak
+*.log
+*.tmp
+*.swp
+*.suo
+*.DS_Store
+Thumbs.db

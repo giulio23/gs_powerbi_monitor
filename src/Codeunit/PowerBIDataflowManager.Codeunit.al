@@ -1,0 +1,392 @@
+codeunit 90135 "Power BI Dataflow Manager"
+{
+    // Specialized management for Power BI dataflows
+
+    var
+        PowerBIHttpClient: Codeunit "Power BI Http Client";
+        PowerBIJsonProcessor: Codeunit "Power BI Json Processor";
+
+    /// <summary>
+    /// Synchronizes dataflows for a specific workspace
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID to sync dataflows for</param>
+    /// <returns>True if synchronization was successful</returns>
+    procedure SynchronizeDataflows(WorkspaceId: Guid): Boolean
+    var
+        ResponseText: Text;
+        JsonArray: JsonArray;
+        EndpointUrl: Text;
+    begin
+
+        // Build API URL (Admin endpoint for service principal, correct OData GUID filter, no curly braces)
+        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/dataflows?$filter=workspaceId eq ' + PowerBIHttpClient.FormatGuidForUrl(WorkspaceId));
+
+        // Execute request
+        if not PowerBIHttpClient.ExecuteGetRequest(EndpointUrl, ResponseText) then
+            exit(false);
+
+        // Validate and parse response
+        if not PowerBIHttpClient.ValidateJsonArrayResponse(ResponseText, JsonArray) then
+            exit(false);
+
+        // Process dataflows
+        ProcessDataflows(WorkspaceId, JsonArray);
+        exit(true);
+    end;
+
+    /// <summary>
+    /// Synchronizes all dataflows across all workspaces
+    /// </summary>
+    /// <returns>True if synchronization was successful</returns>
+    procedure SynchronizeAllDataflows(): Boolean
+    var
+        WorkspaceRec: Record "Power BI Workspace";
+        SuccessCount: Integer;
+        TotalCount: Integer;
+    begin
+        WorkspaceRec.SetRange("Sync Enabled", true);
+        if not WorkspaceRec.FindSet() then begin
+            Message('No workspaces found for dataflow synchronization');
+            exit(true);
+        end;
+
+        repeat
+            TotalCount += 1;
+            if SynchronizeDataflows(WorkspaceRec."Workspace ID") then
+                SuccessCount += 1;
+        until WorkspaceRec.Next() = 0;
+
+        Message('Synchronized dataflows for %1 of %2 workspaces', SuccessCount, TotalCount);
+        exit(SuccessCount > 0);
+    end;
+
+    /// <summary>
+    /// Processes dataflow data from Power BI API response and updates refresh history
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID these dataflows belong to</param>
+    /// <param name="JsonArray">Array of dataflow objects from API</param>
+    local procedure ProcessDataflows(WorkspaceId: Guid; JsonArray: JsonArray)
+    var
+        DataflowRec: Record "Power BI Dataflow";
+        WorkspaceRec: Record "Power BI Workspace";
+        JToken: JsonToken;
+        JObject: JsonObject;
+        Counter: Integer;
+        RefreshHistoryCounter: Integer;
+    begin
+        // Skip if workspace doesn't exist in BC yet
+        WorkspaceRec.SetRange("Workspace ID", WorkspaceId);
+        if WorkspaceRec.IsEmpty() then
+            exit;
+
+        Counter := 0;
+        RefreshHistoryCounter := 0;
+        foreach JToken in JsonArray do begin
+            JObject := JToken.AsObject();
+            if StoreDataflow(WorkspaceId, JObject, DataflowRec) then begin
+                Counter += 1;
+                // Also get refresh history for each dataflow to populate refresh-related fields
+                if GetDataflowRefreshHistory(WorkspaceId, DataflowRec."Dataflow ID") then
+                    RefreshHistoryCounter += 1;
+            end;
+        end;
+        Message('Successfully processed %1 dataflows and updated refresh history for %2 dataflows', Counter, RefreshHistoryCounter);
+    end;
+
+    /// <summary>
+    /// Stores a single dataflow from JSON data
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID this dataflow belongs to</param>
+    /// <param name="JsonObj">JSON object containing dataflow data</param>
+    /// <param name="DataflowRec">Dataflow record to populate</param>
+    /// <returns>True if dataflow was stored successfully</returns>
+    local procedure StoreDataflow(WorkspaceId: Guid; JsonObj: JsonObject; var DataflowRec: Record "Power BI Dataflow"): Boolean
+    var
+        DataflowId: Guid;
+        DataflowName: Text;
+        Description: Text;
+        ConfiguredBy: Text;
+        WebUrl: Text;
+    begin
+        // Extract dataflow information using proper JSON processor
+        if not PowerBIJsonProcessor.ExtractDataflowInfo(JsonObj, DataflowId, DataflowName, Description, ConfiguredBy) then
+            exit(false);
+
+        // Find or create dataflow record (use SetRange to avoid Get error)
+        DataflowRec.SetRange("Dataflow ID", DataflowId);
+        DataflowRec.SetRange("Workspace ID", WorkspaceId);
+        if not DataflowRec.FindFirst() then begin
+            DataflowRec.Init();
+            DataflowRec."Dataflow ID" := DataflowId;
+            DataflowRec."Workspace ID" := WorkspaceId;
+            DataflowRec."Dataflow Name" := CopyStr(DataflowName, 1, MaxStrLen(DataflowRec."Dataflow Name"));
+            DataflowRec."Description" := CopyStr(Description, 1, MaxStrLen(DataflowRec."Description"));
+            DataflowRec."Configured By" := CopyStr(ConfiguredBy, 1, MaxStrLen(DataflowRec."Configured By"));
+            WebUrl := PowerBIJsonProcessor.BuildDataflowWebUrl(WorkspaceId, DataflowId);
+            DataflowRec."Web URL" := CopyStr(WebUrl, 1, MaxStrLen(DataflowRec."Web URL"));
+            DataflowRec."Last Synchronized" := CurrentDateTime();
+            DataflowRec.Insert(false);
+        end else begin
+            // Update dataflow information with proper text length handling
+            DataflowRec."Dataflow Name" := CopyStr(DataflowName, 1, MaxStrLen(DataflowRec."Dataflow Name"));
+            DataflowRec."Description" := CopyStr(Description, 1, MaxStrLen(DataflowRec."Description"));
+            DataflowRec."Configured By" := CopyStr(ConfiguredBy, 1, MaxStrLen(DataflowRec."Configured By"));
+            WebUrl := PowerBIJsonProcessor.BuildDataflowWebUrl(WorkspaceId, DataflowId);
+            DataflowRec."Web URL" := CopyStr(WebUrl, 1, MaxStrLen(DataflowRec."Web URL"));
+            DataflowRec."Last Synchronized" := CurrentDateTime();
+            DataflowRec.Modify(false);
+        end;
+
+        exit(true);
+    end;
+
+    /// <summary>
+    /// Gets dataflow information by ID and workspace
+    /// </summary>
+    /// <param name="DataflowId">The dataflow ID to retrieve</param>
+    /// <param name="WorkspaceId">The workspace ID the dataflow belongs to</param>
+    /// <param name="DataflowRec">The dataflow record to populate</param>
+    /// <returns>True if dataflow was found</returns>
+    procedure GetDataflow(DataflowId: Guid; WorkspaceId: Guid; var DataflowRec: Record "Power BI Dataflow"): Boolean
+    begin
+        exit(DataflowRec.Get(DataflowId, WorkspaceId));
+    end;
+
+    /// <summary>
+    /// Validates if a dataflow exists and belongs to an active workspace
+    /// </summary>
+    /// <param name="DataflowId">The dataflow ID to validate</param>
+    /// <param name="WorkspaceId">The workspace ID to validate</param>
+    /// <returns>True if dataflow is valid and accessible</returns>
+    procedure ValidateDataflow(DataflowId: Guid; WorkspaceId: Guid): Boolean
+    var
+        DataflowRec: Record "Power BI Dataflow";
+        WorkspaceRec: Record "Power BI Workspace";
+    begin
+        if not DataflowRec.Get(DataflowId, WorkspaceId) then
+            exit(false);
+
+        // Check if workspace is enabled for sync
+        if not WorkspaceRec.Get(DataflowRec."Workspace ID") then
+            exit(false);
+
+        exit(WorkspaceRec."Sync Enabled");
+    end;
+
+    /// <summary>
+    /// Triggers a refresh for a specific dataflow
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="DataflowId">The dataflow ID to refresh</param>
+    /// <returns>True if refresh was triggered successfully</returns>
+    procedure TriggerDataflowRefresh(WorkspaceId: Guid; DataflowId: Guid): Boolean
+    var
+        ResponseText: Text;
+        EndpointUrl: Text;
+        RequestBody: Text;
+    begin
+        // Build API URL for dataflow refresh (Admin endpoint for service principal)
+        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/dataflows/' + Format(DataflowId) + '/refreshes');
+
+        // Empty request body for POST
+        RequestBody := '{}';
+
+        // Execute POST request to trigger refresh
+        exit(PowerBIHttpClient.ExecutePostRequest(EndpointUrl, RequestBody, ResponseText));
+    end;
+
+    /// <summary>
+    /// Gets refresh history for a specific dataflow
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="DataflowId">The dataflow ID to get refresh history for</param>
+    /// <returns>True if refresh history was retrieved successfully</returns>
+    procedure GetDataflowRefreshHistory(WorkspaceId: Guid; DataflowId: Guid): Boolean
+    var
+        ResponseText: Text;
+        JsonArray: JsonArray;
+        EndpointUrl: Text;
+    begin
+        // Build API URL for dataflow refresh history (Admin endpoint for service principal)
+        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/dataflows/' + Format(DataflowId) + '/transactions?$top=10');
+
+        // Execute request
+        if not PowerBIHttpClient.ExecuteGetRequest(EndpointUrl, ResponseText) then
+            exit(false);
+
+        // Validate and parse response
+        if not PowerBIHttpClient.ValidateJsonArrayResponse(ResponseText, JsonArray) then
+            exit(false);
+
+        // Process refresh history and update dataflow record
+        ProcessDataflowRefreshHistory(WorkspaceId, DataflowId, JsonArray);
+        exit(true);
+    end;
+
+    /// <summary>
+    /// Processes dataflow refresh history and updates the dataflow record with latest refresh information
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="DataflowId">The dataflow ID</param>
+    /// <param name="JsonArray">Array of refresh transaction objects</param>
+    local procedure ProcessDataflowRefreshHistory(WorkspaceId: Guid; DataflowId: Guid; JsonArray: JsonArray)
+    var
+        DataflowRec: Record "Power BI Dataflow";
+        JToken: JsonToken;
+        JObject: JsonObject;
+        RefreshType: Text;
+        Status: Text;
+        StartTime: DateTime;
+        EndTime: DateTime;
+        Duration: Decimal;
+        TotalDuration: Decimal;
+        SuccessfulCount: Integer;
+        TotalCount: Integer;
+        IsFirst: Boolean;
+    begin
+        if not DataflowRec.Get(DataflowId, WorkspaceId) then
+            exit;
+
+        IsFirst := true;
+        TotalDuration := 0;
+        SuccessfulCount := 0;
+        TotalCount := 0;
+
+        // Process each refresh transaction
+        foreach JToken in JsonArray do begin
+            JObject := JToken.AsObject();
+            if PowerBIJsonProcessor.ExtractRefreshInfo(JObject, RefreshType, Status, StartTime, EndTime) then begin
+                TotalCount += 1;
+
+                // Store individual refresh history record
+                StoreDataflowRefreshHistoryRecord(JObject, DataflowId, DataflowRec."Dataflow Name", WorkspaceId, GetWorkspaceName(WorkspaceId));
+
+                // Calculate duration if both times are present
+                if (StartTime <> 0DT) and (EndTime <> 0DT) then begin
+                    Duration := (EndTime - StartTime) / 60000; // Convert to minutes
+                    TotalDuration += Duration;
+                end;
+
+                // Count successful refreshes
+                if Status = 'Completed' then
+                    SuccessfulCount += 1;
+
+                // Update with latest refresh info (first item is most recent)
+                if IsFirst then begin
+                    DataflowRec."Last Refresh" := StartTime;
+                    DataflowRec."Last Refresh Status" := CopyStr(Status, 1, MaxStrLen(DataflowRec."Last Refresh Status"));
+                    if Duration > 0 then
+                        DataflowRec."Last Refresh Duration (Min)" := Duration;
+                    IsFirst := false;
+                end;
+            end;
+        end;
+
+        // Update aggregate statistics
+        if TotalCount > 0 then begin
+            DataflowRec."Refresh Count" := TotalCount;
+            if SuccessfulCount > 0 then
+                DataflowRec."Average Refresh Duration (Min)" := TotalDuration / SuccessfulCount;
+        end;
+
+        DataflowRec."Last Synchronized" := CurrentDateTime();
+        DataflowRec.Modify(true);
+    end;
+
+    /// <summary>
+    /// Store individual dataflow refresh history record
+    /// </summary>
+    /// <param name="JObject">JSON object containing refresh transaction data</param>
+    /// <param name="DataflowId">The dataflow ID</param>
+    /// <param name="DataflowName">The dataflow name</param>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="WorkspaceName">The workspace name</param>
+    local procedure StoreDataflowRefreshHistoryRecord(JObject: JsonObject; DataflowId: Guid; DataflowName: Text; WorkspaceId: Guid; WorkspaceName: Text)
+    var
+        RefreshHistory: Record "PBI Dataflow Refresh History";
+        TransactionId: Text;
+        StartTime: DateTime;
+        EndTime: DateTime;
+        Status: Text;
+        RefreshType: Text;
+        ErrorMessage: Text;
+        StatusEnum: Enum "Power BI Refresh Status";
+    begin
+        // Extract transaction ID
+        TransactionId := PowerBIJsonProcessor.GetTextValue(JObject, 'transactionId', '');
+        if TransactionId = '' then
+            TransactionId := PowerBIJsonProcessor.GetTextValue(JObject, 'id', '');
+
+        if TransactionId = '' then
+            exit;
+
+        // Check if record already exists
+        RefreshHistory.SetRange("Transaction ID", TransactionId);
+        if RefreshHistory.FindFirst() then
+            exit; // Already processed
+
+        // Create new record
+        RefreshHistory.Init();
+        RefreshHistory."Dataflow ID" := CopyStr(Format(DataflowId), 1, MaxStrLen(RefreshHistory."Dataflow ID"));
+        RefreshHistory."Dataflow Name" := CopyStr(DataflowName, 1, MaxStrLen(RefreshHistory."Dataflow Name"));
+        RefreshHistory."Workspace ID" := CopyStr(Format(WorkspaceId), 1, MaxStrLen(RefreshHistory."Workspace ID"));
+        RefreshHistory."Workspace Name" := CopyStr(WorkspaceName, 1, MaxStrLen(RefreshHistory."Workspace Name"));
+        RefreshHistory."Transaction ID" := CopyStr(TransactionId, 1, MaxStrLen(RefreshHistory."Transaction ID"));
+
+        // Extract and store refresh details
+        StartTime := PowerBIJsonProcessor.GetDateTimeValue(JObject, 'startTime');
+        RefreshHistory."Start Time" := StartTime;
+
+        EndTime := PowerBIJsonProcessor.GetDateTimeValue(JObject, 'endTime');
+        RefreshHistory."End Time" := EndTime;
+
+        // Calculate duration
+        if (StartTime <> 0DT) and (EndTime <> 0DT) then
+            RefreshHistory."Duration (Minutes)" := (EndTime - StartTime) / 60000; // Convert milliseconds to minutes
+
+        // Extract and convert status
+        Status := PowerBIJsonProcessor.GetTextValue(JObject, 'status', '');
+        RefreshType := PowerBIJsonProcessor.GetTextValue(JObject, 'refreshType', '');
+        RefreshHistory."Refresh Type" := CopyStr(RefreshType, 1, MaxStrLen(RefreshHistory."Refresh Type"));
+
+        // Convert status text to enum
+        case UpperCase(Status) of
+            'COMPLETED':
+                StatusEnum := StatusEnum::Completed;
+            'FAILED':
+                StatusEnum := StatusEnum::Failed;
+            'IN PROGRESS', 'INPROGRESS':
+                StatusEnum := StatusEnum::"In Progress";
+            'DISABLED':
+                StatusEnum := StatusEnum::Disabled;
+            'NOTSTARTED':
+                StatusEnum := StatusEnum::NotStarted;
+            else
+                StatusEnum := StatusEnum::Unknown;
+        end;
+        RefreshHistory.Status := StatusEnum;
+
+        // Extract error message if present
+        ErrorMessage := PowerBIJsonProcessor.GetTextValue(JObject, 'error', '');
+        if ErrorMessage = '' then
+            ErrorMessage := PowerBIJsonProcessor.GetTextValue(JObject, 'errorMessage', '');
+        RefreshHistory."Error Message" := CopyStr(ErrorMessage, 1, MaxStrLen(RefreshHistory."Error Message"));
+
+        RefreshHistory."Created DateTime" := CurrentDateTime();
+        RefreshHistory.Insert(true);
+    end;
+
+    /// <summary>
+    /// Get workspace name by workspace ID
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <returns>The workspace name</returns>
+    local procedure GetWorkspaceName(WorkspaceId: Guid): Text
+    var
+        PowerBIWorkspace: Record "Power BI Workspace";
+    begin
+        if PowerBIWorkspace.Get(WorkspaceId) then
+            exit(PowerBIWorkspace."Workspace Name");
+        exit('');
+    end;
+}
