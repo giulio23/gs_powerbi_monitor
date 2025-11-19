@@ -1,36 +1,4 @@
-    /// <summary>
-    /// Triggers a refresh for a specific dataset using the Admin API
-    /// </summary>
-    /// <param name="WorkspaceId">The workspace ID</param>
-    /// <param name="DatasetId">The dataset ID</param>
-    /// <returns>True if refresh was successfully triggered</returns>
-    procedure TriggerDatasetRefresh(WorkspaceId: Guid; DatasetId: Guid): Boolean
-    var
-        EndpointUrl: Text;
-        Body: Text;
-        ResponseText: Text;
-    begin
-        // Admin endpoint – workspaceId not required in URL, but we keep it for logging
-        EndpointUrl :=
-          PowerBIHttpClient.BuildApiUrl(
-            'admin/datasets/' +
-            PowerBIHttpClient.FormatGuidForUrl(DatasetId) +
-            '/refreshes');
-
-        // Optional JSON body – you can tweak notifyOption if you later want emails
-        Body := '{"notifyOption":"NoNotification"}';
-
-        if not PowerBIHttpClient.ExecutePostRequest(EndpointUrl, Body, ResponseText) then begin
-            Error(
-              'Failed to trigger dataset refresh.' + 
-              '\Workspace: %1' +
-              '\Dataset: %2' +
-              '\Response: %3',
-              WorkspaceId, DatasetId, ResponseText);
-        end;
-
-        exit(true);
-    end;
+// ...existing code...
 codeunit 90133 "Power BI Dataset Manager"
 {
     // Dataset-specific operations for Power BI Monitor
