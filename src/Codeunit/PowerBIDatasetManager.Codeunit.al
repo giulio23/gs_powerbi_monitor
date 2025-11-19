@@ -1,3 +1,36 @@
+    /// <summary>
+    /// Triggers a refresh for a specific dataset using the Admin API
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="DatasetId">The dataset ID</param>
+    /// <returns>True if refresh was successfully triggered</returns>
+    procedure TriggerDatasetRefresh(WorkspaceId: Guid; DatasetId: Guid): Boolean
+    var
+        EndpointUrl: Text;
+        Body: Text;
+        ResponseText: Text;
+    begin
+        // Admin endpoint – workspaceId not required in URL, but we keep it for logging
+        EndpointUrl :=
+          PowerBIHttpClient.BuildApiUrl(
+            'admin/datasets/' +
+            PowerBIHttpClient.FormatGuidForUrl(DatasetId) +
+            '/refreshes');
+
+        // Optional JSON body – you can tweak notifyOption if you later want emails
+        Body := '{"notifyOption":"NoNotification"}';
+
+        if not PowerBIHttpClient.ExecutePostRequest(EndpointUrl, Body, ResponseText) then begin
+            Error(
+              'Failed to trigger dataset refresh.' + 
+              '\Workspace: %1' +
+              '\Dataset: %2' +
+              '\Response: %3',
+              WorkspaceId, DatasetId, ResponseText);
+        end;
+
+        exit(true);
+    end;
 codeunit 90133 "Power BI Dataset Manager"
 {
     // Dataset-specific operations for Power BI Monitor
@@ -18,112 +51,50 @@ codeunit 90133 "Power BI Dataset Manager"
         JsonArray: JsonArray;
         EndpointUrl: Text;
     begin
-        // Use Admin API to get all refreshable datasets for all capacities (tenant-wide)
-        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/capacities/refreshables?$top=1000');
+        // Use Admin API to get datasets for a specific workspace
+        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/groups/' +
+            PowerBIHttpClient.FormatGuidForUrl(WorkspaceId) + '/datasets?$top=1000');
 
         // Execute request
         if not PowerBIHttpClient.ExecuteGetRequest(EndpointUrl, ResponseText) then begin
-            Error('Failed to execute GET request for datasets.');
+            Error('Failed to execute GET request for datasets in workspace %1.', WorkspaceId);
             exit(false);
         end;
 
         // Validate and parse response
         if not PowerBIHttpClient.ValidateJsonArrayResponse(ResponseText, JsonArray) then begin
-            Error('Failed to parse JSON array response for datasets.');
+            Error('Failed to parse JSON array response for datasets in workspace %1.', WorkspaceId);
             exit(false);
         end;
 
-        // Process all refreshable datasets, filter by WorkspaceId
-        ProcessRefreshableDatasets(JsonArray, WorkspaceId);
+        // Process datasets for this workspace
+        ProcessDatasets(JsonArray, WorkspaceId);
         exit(true);
     end;
 
     /// <summary>
-    /// Processes refreshable datasets from /admin/capacities/refreshables
+    /// Processes dataset data from Power BI Admin API response
     /// </summary>
-    /// <param name="JsonArray">Array of refreshable objects from API</param>
-    /// <param name="WorkspaceId">The workspace to filter for</param>
-    local procedure ProcessRefreshableDatasets(JsonArray: JsonArray; WorkspaceId: Guid)
-    var
-        JToken: JsonToken;
-        JObject: JsonObject;
-        DatasetWorkspaceId: Guid;
-        PowerBIJsonProcessor: Codeunit "Power BI Json Processor";
-    begin
-        foreach JToken in JsonArray do begin
-            JObject := JToken.AsObject();
-            DatasetWorkspaceId := PowerBIJsonProcessor.GetGuidValue(JObject, 'workspaceId');
-            if DatasetWorkspaceId = WorkspaceId then
-                UpsertRefreshableDataset(JObject, WorkspaceId);
-        end;
-    end;
-
-    /// <summary>
-    /// Upserts a refreshable dataset object in BC
-    /// </summary>
-    /// <param name="JObject">The dataset object</param>
-    /// <param name="WorkspaceId">The workspace ID</param>
-    local procedure UpsertRefreshableDataset(JObject: JsonObject; WorkspaceId: Guid)
+    /// <param name="JsonArray">Array of dataset objects from API</param>
+    /// <param name="WorkspaceId">The workspace ID these datasets belong to</param>
+    local procedure ProcessDatasets(JsonArray: JsonArray; WorkspaceId: Guid)
     var
         DatasetRec: Record "Power BI Dataset";
-        PowerBIJsonProcessor: Codeunit "Power BI Json Processor";
-        DatasetId: Guid;
-        Name: Text;
-        IsNew: Boolean;
-        EmptyGuid: Guid;
+        JToken: JsonToken;
+        JObject: JsonObject;
+        Counter: Integer;
     begin
-        DatasetId := PowerBIJsonProcessor.GetGuidValue(JObject, 'objectId');
-        Name := PowerBIJsonProcessor.GetTextValue(JObject, 'name', '');
-
-        // Debug output for dataset ID
-        Message('Processing DatasetId: %1, Name: %2', DatasetId, Name);
-
-        // Skip if DatasetId is empty or all-zero GUID
-        EmptyGuid := '00000000-0000-0000-0000-000000000000';
-        if (DatasetId = EmptyGuid) or (DatasetId = CreateGuid()) or (Name = '') then
-            exit;
-
-        DatasetRec.SetRange("Workspace ID", WorkspaceId);
-        DatasetRec.SetRange("Dataset ID", DatasetId);
-        IsNew := not DatasetRec.FindFirst();
-        if IsNew then
-            DatasetRec.Init();
-        DatasetRec."Workspace ID" := WorkspaceId;
-        DatasetRec."Dataset ID" := DatasetId;
-        DatasetRec."Dataset Name" := Name;
-        // ... set other fields as needed ...
-        if IsNew then
-            DatasetRec.Insert(true)
-        else
-            DatasetRec.Modify(true);
-    end;
-
-    /// <summary>
-    /// Triggers a refresh for a specific dataset
-    /// </summary>
-    /// <param name="WorkspaceId">The workspace ID</param>
-    /// <param name="DatasetId">The dataset ID</param>
-    /// <returns>True if refresh was successfully triggered</returns>
-    procedure TriggerDatasetRefresh(WorkspaceId: Guid; DatasetId: Guid): Boolean
-    var
-        ResponseText: Text;
-        EndpointUrl: Text;
-        RequestBody: Text;
-    begin
-        // Build API URL (Admin endpoint for service principal)
-        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/datasets/' + PowerBIHttpClient.FormatGuidForUrl(DatasetId) + '/refreshes');
-
-        // Empty JSON body for refresh trigger
-        RequestBody := '{}';
-
-        // Execute POST request
-        if not PowerBIHttpClient.ExecutePostRequest(EndpointUrl, RequestBody, ResponseText) then begin
-            Error('Failed to trigger dataset refresh for DatasetId %1.', DatasetId);
-            exit(false);
+        Counter := 0;
+        foreach JToken in JsonArray do begin
+            JObject := JToken.AsObject();
+            if UpsertDataset(JObject, WorkspaceId, DatasetRec) then
+                Counter += 1;
         end;
-        exit(true);
+        if Counter > 0 then
+            Message('Successfully processed %1 datasets for workspace', Counter);
     end;
 
+    // ...existing code...
     /// <summary>
     /// Gets refresh history for a specific dataset
     /// </summary>
@@ -369,5 +340,93 @@ codeunit 90133 "Power BI Dataset Manager"
             exit(TotalTime / DatasetCount);
 
         exit(0);
+    end;
+
+    /// <summary>
+    /// Upserts a dataset object from the Admin API
+    /// </summary>
+    /// <param name="JObject">The dataset JSON object</param>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="DatasetRec">The dataset record to populate</param>
+    procedure UpsertDataset(JObject: JsonObject; WorkspaceId: Guid; var DatasetRec: Record "Power BI Dataset"): Boolean
+    var
+        DatasetId: Guid;
+        Name: Text;
+        ConfiguredBy: Text;
+        WebUrl: Text;
+        IsRefreshable: Boolean;
+        IsNew: Boolean;
+    begin
+        // Extract dataset ID using standard 'id' field
+        DatasetId := PowerBIJsonProcessor.GetGuidValue(JObject, 'id');
+        Name := PowerBIJsonProcessor.GetTextValue(JObject, 'name', '');
+        // Skip if invalid
+        if IsNullGuid(DatasetId) or (Name = '') then
+            exit(false);
+
+        // Check if record exists
+        DatasetRec.SetRange("Workspace ID", WorkspaceId);
+        DatasetRec.SetRange("Dataset ID", DatasetId);
+        IsNew := not DatasetRec.FindFirst();
+        if IsNew then
+            DatasetRec.Init();
+        // Set fields
+        DatasetRec."Workspace ID" := WorkspaceId;
+        DatasetRec."Dataset ID" := DatasetId;
+        DatasetRec."Dataset Name" := CopyStr(Name, 1, MaxStrLen(DatasetRec."Dataset Name"));
+
+        // Extract optional fields
+        ConfiguredBy := PowerBIJsonProcessor.GetTextValue(JObject, 'configuredBy', '');
+        if ConfiguredBy <> '' then
+            DatasetRec."Configured By" := CopyStr(ConfiguredBy, 1, MaxStrLen(DatasetRec."Configured By"));
+
+        WebUrl := PowerBIJsonProcessor.GetTextValue(JObject, 'webUrl', '');
+        if WebUrl <> '' then
+            DatasetRec."Web URL" := CopyStr(WebUrl, 1, MaxStrLen(DatasetRec."Web URL"));
+
+        IsRefreshable := PowerBIJsonProcessor.GetBooleanValue(JObject, 'isRefreshable', false);
+        DatasetRec."Is Refreshable" := IsRefreshable;
+
+        DatasetRec."Last Synchronized" := CurrentDateTime();
+
+        // Insert or modify
+        if IsNew then
+            DatasetRec.Insert(true)
+        else
+            DatasetRec.Modify(true);
+        exit(true);
+    end;
+    /// <summary>
+    /// Triggers a refresh for a specific dataset using the Admin API
+    /// </summary>
+    /// <param name="WorkspaceId">The workspace ID</param>
+    /// <param name="DatasetId">The dataset ID</param>
+    /// <returns>True if refresh was successfully triggered</returns>
+    procedure TriggerDatasetRefresh(WorkspaceId: Guid; DatasetId: Guid): Boolean
+    var
+        EndpointUrl: Text;
+        Body: Text;
+        ResponseText: Text;
+    begin
+        // Admin endpoint – workspaceId not required in URL, but we keep it for logging
+        EndpointUrl :=
+          PowerBIHttpClient.BuildApiUrl(
+            'admin/datasets/' +
+            PowerBIHttpClient.FormatGuidForUrl(DatasetId) +
+            '/refreshes');
+
+        // Optional JSON body – you can tweak notifyOption if you later want emails
+        Body := '{"notifyOption":"NoNotification"}';
+
+        if not PowerBIHttpClient.ExecutePostRequest(EndpointUrl, Body, ResponseText) then begin
+            Error(
+              'Failed to trigger dataset refresh.' +
+              '\Workspace: %1' +
+              '\Dataset: %2' +
+              '\Response: %3',
+              WorkspaceId, DatasetId, ResponseText);
+        end;
+
+        exit(true);
     end;
 }
