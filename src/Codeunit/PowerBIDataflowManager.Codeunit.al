@@ -185,11 +185,12 @@ codeunit 90135 "Power BI Dataflow Manager"
         EndpointUrl: Text;
         RequestBody: Text;
     begin
-        // Build API URL for dataflow refresh (Admin endpoint for service principal)
-        EndpointUrl := PowerBIHttpClient.BuildApiUrl('admin/dataflows/' + Format(DataflowId) + '/refreshes');
+        // Use groups endpoint for triggering refresh (admin endpoint doesn't support POST)
+        // https://learn.microsoft.com/en-us/rest/api/power-bi/dataflows/refresh-dataflow
+        EndpointUrl := PowerBIHttpClient.BuildApiUrl('groups/' + PowerBIHttpClient.FormatGuidForUrl(WorkspaceId) + '/dataflows/' + PowerBIHttpClient.FormatGuidForUrl(DataflowId) + '/refreshes');
 
-        // Empty request body for POST
-        RequestBody := '{}';
+        // Request body with notifyOption
+        RequestBody := '{"notifyOption":"NoNotification"}';
 
         // Execute POST request to trigger refresh
         exit(PowerBIHttpClient.ExecutePostRequest(EndpointUrl, RequestBody, ResponseText));

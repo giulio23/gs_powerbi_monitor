@@ -376,10 +376,13 @@ codeunit 90133 "Power BI Dataset Manager"
         Body: Text;
         ResponseText: Text;
     begin
-        // Admin endpoint – workspaceId not required in URL, but we keep it for logging
+        // Use groups endpoint for triggering refresh (admin endpoint doesn't support POST)
+        // https://learn.microsoft.com/en-us/rest/api/power-bi/datasets/refresh-dataset-in-group
         EndpointUrl :=
           PowerBIHttpClient.BuildApiUrl(
-            'admin/datasets/' +
+            'groups/' +
+            PowerBIHttpClient.FormatGuidForUrl(WorkspaceId) +
+            '/datasets/' +
             PowerBIHttpClient.FormatGuidForUrl(DatasetId) +
             '/refreshes');
 

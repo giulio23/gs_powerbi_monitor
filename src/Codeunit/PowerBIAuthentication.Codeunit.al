@@ -31,8 +31,6 @@ codeunit 90130 "Power BI Authentication"
         // Get new token
         if RequestNewToken(AuthToken) then begin
             CacheToken(AuthToken);
-            // DEBUG: Output the token for troubleshooting (remove after debugging)
-            Message('Power BI Auth Token: %1', AuthToken);
             exit(true);
         end;
 

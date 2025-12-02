@@ -95,7 +95,6 @@ codeunit 90131 "Power BI Http Client"
         HttpRequestMessage.GetHeaders(HttpHeaders);
         HttpHeaders.Add('Authorization', 'Bearer ' + AuthToken);
 
-
         exit(true);
     end;
 
@@ -103,6 +102,7 @@ codeunit 90131 "Power BI Http Client"
     var
         HttpHeaders: HttpHeaders;
         HttpContent: HttpContent;
+        ContentHeaders: HttpHeaders;
         AuthToken: Text;
     begin
         // Get authentication token
@@ -111,18 +111,16 @@ codeunit 90131 "Power BI Http Client"
 
         // Setup content
         HttpContent.WriteFrom(RequestBody);
-        HttpContent.GetHeaders(HttpHeaders);
-        HttpHeaders.Clear();
-        HttpHeaders.Add('Content-Type', 'application/json');
+        HttpContent.GetHeaders(ContentHeaders);
+        ContentHeaders.Clear();
+        ContentHeaders.Add('Content-Type', 'application/json');
 
-        // Setup request
-        HttpRequestMessage.Method := 'GET';
+        // Setup request - FIXED: Changed method to POST and assigned content
+        HttpRequestMessage.Method := 'POST';
         HttpRequestMessage.SetRequestUri(EndpointUrl);
+        HttpRequestMessage.Content := HttpContent;
         HttpRequestMessage.GetHeaders(HttpHeaders);
         HttpHeaders.Add('Authorization', 'Bearer ' + AuthToken);
-
-        // DEBUG: Output the API URL for troubleshooting (remove after debugging)
-        Message('Power BI API URL: %1', EndpointUrl);
 
         exit(true);
     end;
